@@ -87,27 +87,6 @@ contract TimeLockPoolUnlocked is BasePool, ITimeLockPool {
      */
     function deposit(uint256 _amount, uint256 _duration, address _receiver) external override {
         revert ConcludeDepositError();
-
-        if (_amount == 0) {
-            revert ZeroAmountError();
-        }
-        // Don't allow locking > maxLockDuration
-        uint256 duration = _duration.min(maxLockDuration);
-        // Enforce min lockup duration to prevent flash loan or MEV transaction ordering
-        duration = duration.max(MIN_LOCK_DURATION);
-
-        uint256 mintAmount = _amount * getMultiplier(duration) / ONE;
-
-        depositsOf[_receiver].push(Deposit({
-            amount: _amount,
-            shareAmount: mintAmount,
-            start: uint64(block.timestamp),
-            end: uint64(block.timestamp) + uint64(duration)
-        }));
-
-        _mint(_receiver, mintAmount);
-        depositToken.safeTransferFrom(_msgSender(), address(this), _amount);
-        emit Deposited(_amount, duration, _receiver, _msgSender());
     }
 
     /**
@@ -155,41 +134,6 @@ contract TimeLockPoolUnlocked is BasePool, ITimeLockPool {
      */
     function extendLock(uint256 _depositId, uint256 _increaseDuration) external {
         revert ConcludeDepositError();
-
-        // Check if actually increasing
-        if (_increaseDuration == 0) {
-            revert ZeroDurationError();
-        }
-
-        Deposit memory userDeposit = depositsOf[_msgSender()][_depositId];
-
-        // Only can extend if it has not expired
-        if (block.timestamp >= userDeposit.end) {
-            revert DepositExpiredError();
-        }
-        
-        // Enforce min increase to prevent flash loan or MEV transaction ordering
-        uint256 increaseDuration = _increaseDuration.max(MIN_LOCK_DURATION);
-        
-        // New duration is the time expiration plus the increase
-        uint256 duration = maxLockDuration.min(uint256(userDeposit.end - block.timestamp) + increaseDuration);
-
-        uint256 mintAmount = userDeposit.amount * getMultiplier(duration) / ONE;
-
-        // Multiplier curve changes with time, need to check if the mint amount is bigger, equal or smaller than the already minted
-        
-        // If the new amount if bigger mint the difference
-        if (mintAmount >= userDeposit.shareAmount) {
-            depositsOf[_msgSender()][_depositId].shareAmount =  mintAmount;
-            _mint(_msgSender(), mintAmount - userDeposit.shareAmount);
-        // If the new amount is less then burn that difference
-        } else {
-            revert ShareBurningError();
-        }
-
-        depositsOf[_msgSender()][_depositId].start = uint64(block.timestamp);
-        depositsOf[_msgSender()][_depositId].end = uint64(block.timestamp) + uint64(duration);
-        emit LockExtended(_depositId, _increaseDuration, _msgSender());
     }
 
     /**
@@ -205,30 +149,6 @@ contract TimeLockPoolUnlocked is BasePool, ITimeLockPool {
      */
     function increaseLock(uint256 _depositId, address _receiver, uint256 _increaseAmount) external {
         revert ConcludeDepositError();
-
-        // Check if actually increasing
-        if (_increaseAmount == 0) {
-            revert ZeroAmountError();
-        }
-
-        Deposit memory userDeposit = depositsOf[_receiver][_depositId];
-
-        // Only can extend if it has not expired
-        if (block.timestamp >= userDeposit.end) {
-            revert DepositExpiredError();
-        }
-
-        // Multiplier should be according the remaining time  from the deposit until its end.
-        uint256 remainingDuration = uint256(userDeposit.end - block.timestamp);
-
-        uint256 mintAmount = _increaseAmount * getMultiplier(remainingDuration) / ONE;
-
-        depositsOf[_receiver][_depositId].amount += _increaseAmount;
-        depositsOf[_receiver][_depositId].shareAmount += mintAmount;
-
-        _mint(_receiver, mintAmount);
-        depositToken.safeTransferFrom(_msgSender(), address(this), _increaseAmount);
-        emit LockIncreased(_depositId, _receiver, _msgSender(), _increaseAmount);
     }
 
     /**
