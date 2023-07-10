@@ -40,6 +40,11 @@ if (!infuraApiKey) {
   throw new Error("Please set your INFURA_API_KEY in a .env file");
 }
 
+const block_number: string | undefined = process.env.BLOCK_NUMBER;
+if (!block_number) {
+  throw new Error("Please set your BLOCK_NUMBER in a .env file");
+}
+
 function getChainConfig(network: keyof typeof chainIds): NetworkUserConfig {
   const url: string = "https://" + network + ".infura.io/v3/" + infuraApiKey;
   return {
@@ -67,6 +72,10 @@ const config: HardhatUserConfig = {
         mnemonic,
       },
       chainId: chainIds.hardhat,
+      forking: {
+        url: "https://mainnet.infura.io/v3/" + infuraApiKey,
+        blockNumber: parseInt(block_number)
+      }
     },
     goerli: getChainConfig("goerli"),
     kovan: getChainConfig("kovan"),

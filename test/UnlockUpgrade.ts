@@ -2,7 +2,7 @@ import { parseEther, formatEther } from "@ethersproject/units";
 import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
 import { expect } from "chai";
 import { BigNumber, constants, Contract  } from "ethers";
-import hre, { ethers } from "hardhat";
+import hre, { network, ethers } from "hardhat";
 
 import {
     TestToken__factory,
@@ -308,6 +308,280 @@ describe("UnlockedUpgradeable", function () {
                     const arraySlot = ethers.utils.keccak256(mappingSlot);
                     const storageSlot = BigNumber.from(arraySlot).add(i).toHexString();
                     const value = await hre.ethers.provider.getStorageAt(proxy.address, storageSlot);
+                    const obj = { storageSlot, value };
+                    finalDepositStorage.push(obj);
+                }
+
+                const equalArrays = initialDepositStorage.length === finalDepositStorage.length && initialDepositStorage.every((obj, index) =>
+                    // @ts-ignore
+                    obj.storageSlot === finalDepositStorage[index].storageSlot && obj.value === finalDepositStorage[index].value
+                );
+
+                // Storage slots should have the same values and deposit balances shouldn't change
+                expect(equalArrays).to.be.eq(true);
+                expect(depositTokenBalanceAfter).to.be.eq(depositTokenBalanceBefore);
+                expect(depositsAfter[0].amount).to.be.eq(depositsBefore[0].amount);
+                expect(depositsAfter[1].amount).to.be.eq(depositsBefore[1].amount);
+                expect(depositsAfter[0].start).to.be.eq(depositsBefore[0].start);
+                expect(depositsAfter[1].start).to.be.eq(depositsBefore[1].start);
+                expect(depositsAfter[0].end).to.be.eq(depositsBefore[0].end);
+                expect(depositsAfter[1].end).to.be.eq(depositsBefore[1].end);
+                expect(totalDepositAfter).to.be.eq(totalDepositBefore);
+                expect(timeLockNonTransferablePoolBalanceAfter).to.be.eq(timeLockNonTransferablePoolBalanceBefore);
+            });
+        });
+
+        describe("mainnet fork upgrade", async() => {
+            it("Should upgrade correctly on mainnet fork", async() => {
+                const MAINNET_IMPLEMENTATION = "0x6411c8b68ce74e2907110e522c67d400fcd3cf4b";
+                const MAINNET_MULTISIG = "0x7e9e4c0876b2102f33a1d82117cc73b7fddd0032";
+                const MAINNET_PROXY_ADMIN = "0x56234f99393c2af40a3fe901dceef0b03d61a219";
+                const MAINNET_MC_POOL = "0x74adae862adcccf7a7dbf2f7b139ab56e6b0e79d";
+
+                // Intantiate mainnet upgradeable proxy
+                let mainnetProxyMC: TransparentUpgradeableProxy;
+                const MainnetProxyMC = await ethers.getContractFactory("TransparentUpgradeableProxy");
+                mainnetProxyMC = MainnetProxyMC.attach(MAINNET_MC_POOL);
+
+                // Get initial implementation address from storage slot
+                const initialImplementation = await hre.ethers.provider.getStorageAt(mainnetProxyMC.address, "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
+                const initialImplementationAddress = "0x"+initialImplementation.slice(-40);
+
+                // Get multisig as signer
+                await network.provider.request({
+                    method: "hardhat_impersonateAccount",
+                    params: [MAINNET_MULTISIG],
+                });
+                const multisig: SignerWithAddress = await ethers.getSigner(MAINNET_MULTISIG);
+
+                // Deploy the new unlocked implementation
+                let timeLockNonTransferablePoolUnlockedImplementation: TimeLockNonTransferablePoolUnlocked;
+                const TimeLockNonTransferablePoolUnlockedFactory = new TimeLockNonTransferablePoolUnlocked__factory(multisig);
+                timeLockNonTransferablePoolUnlockedImplementation = await TimeLockNonTransferablePoolUnlockedFactory.deploy();
+
+                // Instantiate mainnet proxy admin
+                let mainnetProxyAdmin: ProxyAdmin;
+                const MainnetProxyAdmin = await ethers.getContractFactory("ProxyAdmin");
+                mainnetProxyAdmin = MainnetProxyAdmin.attach(MAINNET_PROXY_ADMIN);
+     
+                // Upgrade and check for correct event
+                await expect(mainnetProxyAdmin.connect(multisig).upgrade(MAINNET_MC_POOL, timeLockNonTransferablePoolUnlockedImplementation.address))
+                .to.emit(mainnetProxyMC, "Upgraded")
+                .withArgs(timeLockNonTransferablePoolUnlockedImplementation.address);
+
+                // Get final implementation address from storage slot
+                const finalImplementation = await hre.ethers.provider.getStorageAt(mainnetProxyMC.address, "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
+                const finalImplementationAddress = "0x"+finalImplementation.slice(-40);
+
+                // Initial deposit should exist. Final deposit shouldn't exist. Token balance shouldn't change after all
+                expect(initialImplementationAddress).to.be.eq(MAINNET_IMPLEMENTATION);
+                expect(finalImplementationAddress).to.be.eq(timeLockNonTransferablePoolUnlockedImplementation.address.toLowerCase());
+                expect(initialImplementation).to.be.not.eq(finalImplementation);
+            });
+
+            it("Should be able to withdraw after the upgrade on mainnet fork", async() => {
+                const MAINNET_MULTISIG = "0x7e9e4c0876b2102f33a1d82117cc73b7fddd0032";
+                const MAINNET_PROXY_ADMIN = "0x56234f99393c2af40a3fe901dceef0b03d61a219";
+                const MAINNET_MC_POOL = "0x74adae862adcccf7a7dbf2f7b139ab56e6b0e79d";
+                const MAINNET_DEPOSITOR = "0xf4fbcb5cc96fecd9b2b1af1347fefc294bf762ef";
+                const MAINNET_MC_TOKEN = "0x949d48eca67b17269629c7194f4b727d4ef9e5d6";
+
+                // Instantiate mainnet token
+                let mainnetDepositToken: TestToken;
+                const MainnetDepositToken = await ethers.getContractFactory("TestToken");
+                mainnetDepositToken = MainnetDepositToken.attach(MAINNET_MC_TOKEN);
+
+                // Instatiate mainnet proxy
+                let mainnetTimeLockNonTransferablePool: TimeLockNonTransferablePool;
+                const MainnetTimeLockNonTransferablePool = await ethers.getContractFactory("TimeLockNonTransferablePool");
+                mainnetTimeLockNonTransferablePool = MainnetTimeLockNonTransferablePool.attach(MAINNET_MC_POOL);
+
+                // Get depositor as signer
+                await network.provider.request({
+                    method: "hardhat_impersonateAccount",
+                    params: [MAINNET_DEPOSITOR],
+                });
+                const depositor: SignerWithAddress = await ethers.getSigner(MAINNET_DEPOSITOR);
+
+                // Get initial deposits and balances
+                const initialDeposits = await mainnetTimeLockNonTransferablePool.getDepositsOf(MAINNET_DEPOSITOR);
+                const initialBalance = await mainnetDepositToken.balanceOf(MAINNET_DEPOSITOR);
+
+                // Withdraw should fail
+                await expect(mainnetTimeLockNonTransferablePool.connect(depositor).withdraw(0, MAINNET_DEPOSITOR)).to.be.revertedWith("TooSoonError()");
+
+                // Get multisig as signer
+                await network.provider.request({
+                    method: "hardhat_impersonateAccount",
+                    params: [MAINNET_MULTISIG],
+                });
+                const multisig: SignerWithAddress = await ethers.getSigner(MAINNET_MULTISIG);
+
+                // Deploy the new unlocked implementation
+                let timeLockNonTransferablePoolUnlockedImplementation: TimeLockNonTransferablePoolUnlocked;
+                const TimeLockNonTransferablePoolUnlockedFactory = new TimeLockNonTransferablePoolUnlocked__factory(multisig);
+                timeLockNonTransferablePoolUnlockedImplementation = await TimeLockNonTransferablePoolUnlockedFactory.deploy();
+
+                // Instantiate mainnet proxy admin
+                let mainnetProxyAdmin: ProxyAdmin;
+                const MainnetProxyAdmin = await ethers.getContractFactory("ProxyAdmin");
+                mainnetProxyAdmin = MainnetProxyAdmin.attach(MAINNET_PROXY_ADMIN);
+                
+                // Upgrade
+                mainnetProxyAdmin.connect(multisig).upgrade(MAINNET_MC_POOL, timeLockNonTransferablePoolUnlockedImplementation.address);
+
+                // Instantiate mainnet upgraded proxy with implementation interface
+                let mainnetTimeLockNonTransferablePoolUnlocked: TimeLockNonTransferablePoolUnlocked;
+                const MainnetTimeLockNonTransferablePoolUnlocked = await ethers.getContractFactory("TimeLockNonTransferablePoolUnlocked");
+                mainnetTimeLockNonTransferablePoolUnlocked = MainnetTimeLockNonTransferablePoolUnlocked.attach(MAINNET_MC_POOL);
+
+                // Withdraw should be successful
+                await mainnetTimeLockNonTransferablePoolUnlocked.connect(depositor).withdraw(0, MAINNET_DEPOSITOR);
+
+                // Get final deposits and balances
+                const finalDeposits = await mainnetTimeLockNonTransferablePoolUnlocked.getDepositsOf(MAINNET_DEPOSITOR);
+                const finalBalance = await mainnetDepositToken.balanceOf(MAINNET_DEPOSITOR);
+
+                // Difference in balance should be equal to the first deposit amount
+                expect(initialDeposits[0].amount).to.be.eq(finalBalance.sub(initialBalance));
+                expect(finalDeposits.length).to.be.eq(initialDeposits.length - 1);
+            });
+
+            it("Should fail on deposit, lock extension and lock increase after the upgrade on mainnet fork", async() => {
+                const MAINNET_MULTISIG = "0x7e9e4c0876b2102f33a1d82117cc73b7fddd0032";
+                const MAINNET_PROXY_ADMIN = "0x56234f99393c2af40a3fe901dceef0b03d61a219";
+                const MAINNET_MC_POOL = "0x74adae862adcccf7a7dbf2f7b139ab56e6b0e79d";
+                const MAINNET_DEPOSITOR = "0xf4fbcb5cc96fecd9b2b1af1347fefc294bf762ef";
+            
+                // Get depositor as signer
+                await network.provider.request({
+                    method: "hardhat_impersonateAccount",
+                    params: [MAINNET_DEPOSITOR],
+                });
+                const depositor: SignerWithAddress = await ethers.getSigner(MAINNET_DEPOSITOR);
+
+                // Get multisig as signer
+                await network.provider.request({
+                    method: "hardhat_impersonateAccount",
+                    params: [MAINNET_MULTISIG],
+                });
+                const multisig: SignerWithAddress = await ethers.getSigner(MAINNET_MULTISIG);
+
+               // Instatiate mainnet proxy
+               let mainnetTimeLockNonTransferablePool: TimeLockNonTransferablePool;
+               const MainnetTimeLockNonTransferablePool = await ethers.getContractFactory("TimeLockNonTransferablePool");
+               mainnetTimeLockNonTransferablePool = MainnetTimeLockNonTransferablePool.attach(MAINNET_MC_POOL);
+
+                // Get initial deposits and balances
+                const initialDeposits = await mainnetTimeLockNonTransferablePool.getDepositsOf(MAINNET_DEPOSITOR);
+
+                // Deploy the new unlocked implementation
+                let timeLockNonTransferablePoolUnlockedImplementation: TimeLockNonTransferablePoolUnlocked;
+                const TimeLockNonTransferablePoolUnlockedFactory = new TimeLockNonTransferablePoolUnlocked__factory(multisig);
+                timeLockNonTransferablePoolUnlockedImplementation = await TimeLockNonTransferablePoolUnlockedFactory.deploy();
+
+                // Instantiate mainnet proxy admin
+                let mainnetProxyAdmin: ProxyAdmin;
+                const MainnetProxyAdmin = await ethers.getContractFactory("ProxyAdmin");
+                mainnetProxyAdmin = MainnetProxyAdmin.attach(MAINNET_PROXY_ADMIN);
+
+                // Upgrade
+                mainnetProxyAdmin.connect(multisig).upgrade(MAINNET_MC_POOL, timeLockNonTransferablePoolUnlockedImplementation.address);
+
+                // Instantiate mainnet upgraded proxy with implementation interface
+                let mainnetTimeLockNonTransferablePoolUnlocked: TimeLockNonTransferablePoolUnlocked;
+                const MainnetTimeLockNonTransferablePoolUnlocked = await ethers.getContractFactory("TimeLockNonTransferablePoolUnlocked");
+                mainnetTimeLockNonTransferablePoolUnlocked = MainnetTimeLockNonTransferablePoolUnlocked.attach(MAINNET_MC_POOL);
+
+                // All three txs should revert with error
+                await expect(mainnetTimeLockNonTransferablePoolUnlocked.connect(depositor).deposit(initialDeposits[0].amount.toString(), constants.MaxUint256, MAINNET_DEPOSITOR)).to.be.revertedWith("ConcludeDepositError()");
+                await expect(mainnetTimeLockNonTransferablePoolUnlocked.connect(depositor).extendLock(0, 0)).to.be.revertedWith("ConcludeDepositError()");
+                await expect(mainnetTimeLockNonTransferablePoolUnlocked.connect(depositor).increaseLock(0, MAINNET_DEPOSITOR, 0)).to.be.revertedWith("ConcludeDepositError()");
+            });
+
+            it("Should preserve the deposits in the same slot after upgrade on mainnnet fork", async() => {
+                const MAINNET_MULTISIG = "0x7e9e4c0876b2102f33a1d82117cc73b7fddd0032";
+                const MAINNET_PROXY_ADMIN = "0x56234f99393c2af40a3fe901dceef0b03d61a219";
+                const MAINNET_MC_POOL = "0x74adae862adcccf7a7dbf2f7b139ab56e6b0e79d";
+                const MAINNET_DEPOSITOR = "0xf4fbcb5cc96fecd9b2b1af1347fefc294bf762ef";
+                const MAINNET_MC_TOKEN = "0x949d48eca67b17269629c7194f4b727d4ef9e5d6";
+
+                // Instantiate mainnet token
+                let mainnetDepositToken: TestToken;
+                const MainnetDepositToken = await ethers.getContractFactory("TestToken");
+                mainnetDepositToken = MainnetDepositToken.attach(MAINNET_MC_TOKEN);
+                
+                // Instatiate mainnet proxy
+                let mainnetTimeLockNonTransferablePool: TimeLockNonTransferablePool;
+                const MainnetTimeLockNonTransferablePool = await ethers.getContractFactory("TimeLockNonTransferablePool");
+                mainnetTimeLockNonTransferablePool = MainnetTimeLockNonTransferablePool.attach(MAINNET_MC_POOL);
+
+                // Get multisig as signer
+                await network.provider.request({
+                    method: "hardhat_impersonateAccount",
+                    params: [MAINNET_MULTISIG],
+                });
+                const multisig: SignerWithAddress = await ethers.getSigner(MAINNET_MULTISIG);
+
+                // Get initial deposits and balances
+                const initialDeposits = await mainnetTimeLockNonTransferablePool.getDepositsOf(MAINNET_DEPOSITOR);
+                expect(initialDeposits.length).to.be.greaterThan(0);
+
+                // Get pre-upgrade storage slots deposits
+                let initialDepositStorage = [];
+                // mapping(address => Deposit[]) public depositsOf is in slot 467
+                const SLOT = 467;
+                // Loop six times as there are 2 deposits, and the struct of each deposit ocuppies 3 storage slots (uint256, uint256, uint64, uint64)
+                for(let i = 0; i < initialDeposits.length * 3; i++) {
+                    // A mapping storage slot is determined by doing keccak256(key, mapping slot)
+                    const mappingSlot = ethers.utils.keccak256(ethers.utils.defaultAbiCoder.encode(["address", "uint256"], [MAINNET_DEPOSITOR, SLOT]));
+                    // An array storage slot is determined by doing keccak256(array slot), which is this case is the result of the mapping storage slot
+                    const arraySlot = ethers.utils.keccak256(mappingSlot);
+                    // Storage slots from arrays are determined by the array storage slot plus the index (arraySlot + 0, +1, +2 ...)
+                    const storageSlot = BigNumber.from(arraySlot).add(i).toHexString();
+                    const value = await hre.ethers.provider.getStorageAt(MAINNET_MC_POOL, storageSlot);
+                    const obj = { storageSlot, value };
+                    initialDepositStorage.push(obj);
+                }
+
+                // Get deposits before upgrade
+                const depositTokenBalanceBefore = await mainnetDepositToken.balanceOf(MAINNET_DEPOSITOR);
+                const depositsBefore = await mainnetTimeLockNonTransferablePool.getDepositsOf(MAINNET_DEPOSITOR);
+                const totalDepositBefore = await mainnetTimeLockNonTransferablePool.getTotalDeposit(MAINNET_DEPOSITOR);
+                const timeLockNonTransferablePoolBalanceBefore = await mainnetTimeLockNonTransferablePool.balanceOf(MAINNET_DEPOSITOR);
+
+                // Deploy the new unlocked implementation
+                let timeLockNonTransferablePoolUnlockedImplementation: TimeLockNonTransferablePoolUnlocked;
+                const TimeLockNonTransferablePoolUnlockedFactory = new TimeLockNonTransferablePoolUnlocked__factory(multisig);
+                timeLockNonTransferablePoolUnlockedImplementation = await TimeLockNonTransferablePoolUnlockedFactory.deploy();
+
+                // Instantiate mainnet proxy admin
+                let mainnetProxyAdmin: ProxyAdmin;
+                const MainnetProxyAdmin = await ethers.getContractFactory("ProxyAdmin");
+                mainnetProxyAdmin = MainnetProxyAdmin.attach(MAINNET_PROXY_ADMIN);
+
+                // Upgrade
+                mainnetProxyAdmin.connect(multisig).upgrade(MAINNET_MC_POOL, timeLockNonTransferablePoolUnlockedImplementation.address);
+
+                // Instantiate mainnet upgraded proxy with implementation interface
+                let mainnetTimeLockNonTransferablePoolUnlocked: TimeLockNonTransferablePoolUnlocked;
+                const MainnetTimeLockNonTransferablePoolUnlocked = await ethers.getContractFactory("TimeLockNonTransferablePoolUnlocked");
+                mainnetTimeLockNonTransferablePoolUnlocked = MainnetTimeLockNonTransferablePoolUnlocked.attach(MAINNET_MC_POOL);
+
+                // Get deposits after upgrade
+                const depositTokenBalanceAfter = await mainnetDepositToken.balanceOf(MAINNET_DEPOSITOR);
+                const depositsAfter = await mainnetTimeLockNonTransferablePoolUnlocked.getDepositsOf(MAINNET_DEPOSITOR);
+                const totalDepositAfter = await mainnetTimeLockNonTransferablePoolUnlocked.getTotalDeposit(MAINNET_DEPOSITOR);
+                const timeLockNonTransferablePoolBalanceAfter = await mainnetTimeLockNonTransferablePoolUnlocked.balanceOf(MAINNET_DEPOSITOR);
+    
+                // Get pre-upgrade storage slots deposits
+                // @ts-ignore
+                let finalDepositStorage = [];
+                for(let i = 0; i < initialDeposits.length * 3; i++) {
+                    const mappingSlot = ethers.utils.keccak256(ethers.utils.defaultAbiCoder.encode(["address", "uint256"], [MAINNET_DEPOSITOR, SLOT]));
+                    const arraySlot = ethers.utils.keccak256(mappingSlot);
+                    const storageSlot = BigNumber.from(arraySlot).add(i).toHexString();
+                    const value = await hre.ethers.provider.getStorageAt(MAINNET_MC_POOL, storageSlot);
                     const obj = { storageSlot, value };
                     finalDepositStorage.push(obj);
                 }
