@@ -39,6 +39,44 @@ const CURVE = [
     (5*1e18).toString()
 ]
 
+function theoreticalMultiplier(
+    _duration: any,
+    curve: any
+) {
+    
+    const unit = Math.floor(MAX_LOCK_DURATION / (curve.length - 1))
+    const duration = Math.min(Math.max(Number(_duration), 600), MAX_LOCK_DURATION)
+    const n = Math.floor(duration / unit)
+
+    if (n == curve.length - 1) {
+        const mcn = hre.ethers.BigNumber.from(curve[n])
+        let result
+        if(mcn.lt(MAX_BONUS)) {
+            result = mcn.add(parseEther("1"))
+        } else {
+            result = MAX_BONUS.add(parseEther("1"))
+        }
+
+        return result.toString()
+    }
+
+    const mcn = hre.ethers.BigNumber.from(curve[n])
+    const mcn1 = hre.ethers.BigNumber.from(curve[n + 1])
+    const BNunit = hre.ethers.BigNumber.from(unit)
+    const BNn = hre.ethers.BigNumber.from(n)
+    const BNduration = hre.ethers.BigNumber.from(_duration)
+
+    const res = mcn.add(BNduration.sub(BNn.mul(BNunit)).mul(mcn1.sub(mcn)).div(BNunit))
+    let result
+    if(res.lt(MAX_BONUS)) {
+        result = res.add(parseEther("1"))
+    } else {
+        result = MAX_BONUS.add(parseEther("1"))
+    }
+
+    return result.toString()
+}
+
 describe("UnlockedUpgradeable", function () {
 
     let deployer: SignerWithAddress;
@@ -53,6 +91,7 @@ describe("UnlockedUpgradeable", function () {
     let rewardToken: TestToken;
     let timeLockNonTransferablePool: Contract;
     let timeLockNonTransferablePoolImplementation: TimeLockNonTransferablePool;
+    let timeLockNonTransferablePoolUnlocked: TimeLockNonTransferablePoolUnlocked;
     let escrowPool: TestTimeLockPool;
     let proxyAdmin: ProxyAdmin;
     let proxy: TransparentUpgradeableProxy;
@@ -155,11 +194,6 @@ describe("UnlockedUpgradeable", function () {
             it("Should set correctly the implementation", async() => {
                 const getProxyImplementation = await proxyAdmin.getProxyImplementation(proxy.address);
                 expect(getProxyImplementation).to.be.eq(timeLockNonTransferablePoolImplementation.address)
-            });
-
-            it("Should have governance as owner", async() => {
-                const owner = await proxyAdmin.owner();
-                expect(owner).to.be.eq(governance.address)
             });
 
             it("Should have governance as owner", async() => {
@@ -604,5 +638,404 @@ describe("UnlockedUpgradeable", function () {
                 expect(timeLockNonTransferablePoolBalanceAfter).to.be.eq(timeLockNonTransferablePoolBalanceBefore);
             });
         });
+
+        describe("unchanged functions", async() => {
+            describe("setCurve and setCurvePoint", async() => {
+                beforeEach(async() => {
+                    await timeTraveler.revertSnapshot();
+    
+                    // Upgrade
+                    let timeLockNonTransferablePoolUnlockedImplementation: TimeLockNonTransferablePoolUnlocked;
+                    const TimeLockNonTransferablePoolUnlockedFactory = new TimeLockNonTransferablePoolUnlocked__factory(deployer);
+                    timeLockNonTransferablePoolUnlockedImplementation = await TimeLockNonTransferablePoolUnlockedFactory.deploy();
+                    await proxyAdmin.connect(governance).upgrade(proxy.address, timeLockNonTransferablePoolUnlockedImplementation.address);
+    
+                    const TimeLockNonTransferablePoolUnlocked = await ethers.getContractFactory("TimeLockNonTransferablePoolUnlocked");
+                    timeLockNonTransferablePoolUnlocked = await TimeLockNonTransferablePoolUnlocked.attach(proxy.address);
+                    timeLockNonTransferablePoolUnlocked = timeLockNonTransferablePoolUnlocked.connect(account1);
+                });
+
+                it("Replacing a curve with a non gov role account should fail", async() => {
+                    // Mapping a new curve for replacing the old one
+                    const NEW_CURVE = CURVE.map(function(x) {
+                        return (hre.ethers.BigNumber.from(x).mul(2).toString())
+                    })
+                    await expect(timeLockNonTransferablePoolUnlocked.setCurve(NEW_CURVE)).to.be.revertedWith("NotGovError()");
+                });
+        
+                it("Replacing a curve should emit an event", async() => {
+                    // Mapping a new curve for replacing the old one
+                    const NEW_CURVE = CURVE.map(function(x) {
+                        return (hre.ethers.BigNumber.from(x).mul(2).toString())
+                    })
+                    await expect(timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE))            
+                        .to.emit(timeLockNonTransferablePoolUnlocked, "CurveChanged")
+                        .withArgs(governance.address);
+                })
+        
+                it("Replacing with a same length curve should do it correctly", async() => {
+                    // Mapping a new curve for replacing the old one
+                    const NEW_CURVE = CURVE.map(function(x) {
+                        return (hre.ethers.BigNumber.from(x).mul(2).toString())
+                    })
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE);
+        
+                    for(let i=0; i< NEW_CURVE.length; i++){
+                        const curvePoint = await timeLockNonTransferablePoolUnlocked.curve(i);
+                        expect(curvePoint).to.be.eq(NEW_CURVE[i])
+                    }
+                    await expect(timeLockNonTransferablePoolUnlocked.curve(NEW_CURVE.length + 1)).to.be.reverted;
+                })
+        
+                it("Replacing with a shorter curve should do it correctly", async() => {
+                    // Setting a two point element curve
+                    const NEW_CURVE = [(1e18).toString(), (2*1e18).toString()]
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE);
+        
+                    for(let i=0; i< NEW_CURVE.length; i++){
+                        const curvePoint = await timeLockNonTransferablePoolUnlocked.curve(i);
+                        expect(curvePoint).to.be.eq(NEW_CURVE[i])
+                    }
+                    await expect(timeLockNonTransferablePoolUnlocked.curve(NEW_CURVE.length + 1)).to.be.reverted;
+                })
+        
+                it("Replacing with a longer curve should do it correctly", async() => {
+                    const NEW_RAW_CURVE = [
+                        0,
+                        0.113450636781733,
+                        0.23559102796425,
+                        0.367086765506204,
+                        0.508654422399196,
+                        0.661065457561288,
+                        0.825150419825931,
+                        1.00180347393553,
+                        1.19198727320361,
+                        1.39673820539865,
+                        1.61717204043653,
+                        1.85449001065813,
+                        2.10998535682594,
+                        2.38505037551144,
+                        2.6811840062773,
+                        3,
+                        3.34323571284532,
+                        3.71276157381861,
+                        4.11059127748229,
+                        4.53889275738489,
+                        5
+                    ]
+                
+                    const NEW_CURVE = NEW_RAW_CURVE.map(function(x) {
+                        return (x*1e18).toString();
+                    })
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE);
+        
+                    for(let i=0; i< NEW_CURVE.length; i++){
+                        const curvePoint = await timeLockNonTransferablePoolUnlocked.curve(i);
+                        expect(curvePoint).to.be.eq(NEW_CURVE[i])
+                    }
+                    await expect(timeLockNonTransferablePoolUnlocked.curve(NEW_CURVE.length + 1)).to.be.reverted;
+                })
+        
+                it("Replacing with a curve that is not monotonic increasing should fail", async() => {
+                    const NEW_RAW_CURVE = [
+                        0,
+                        1,
+                        2,
+                        100,
+                        4,
+                        5
+                    ]
+        
+                    const NEW_CURVE = NEW_RAW_CURVE.map(function(x) {
+                        return (x*1e18).toString();
+                    })
+                    await expect(timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE)).to.be.revertedWith("CurveIncreaseError");
+                })
+        
+                it("Replacing a point with a non gov role account should fail", async() => {
+                    await expect(timeLockNonTransferablePoolUnlocked.setCurvePoint((4*1e18).toString(), 3)).to.be.revertedWith("NotGovError()");
+                });
+        
+                it("Replacing a point should emit an event", async() => {
+                    await expect(timeLockNonTransferablePoolUnlocked.connect(governance).setCurvePoint((4*1e18).toString(), 3))            
+                        .to.emit(timeLockNonTransferablePoolUnlocked, "CurveChanged")
+                        .withArgs(governance.address);
+                })
+        
+                it("Replacing a point should do it correctly", async() => {
+                    const curvePoint = await timeLockNonTransferablePoolUnlocked.connect(governance).curve(3);
+                    
+                    const newPoint = (4*1e18).toString();
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurvePoint(newPoint, 3);
+        
+                    const changedCurvePoint = await timeLockNonTransferablePoolUnlocked.curve(3);
+                    expect(curvePoint).not.to.be.eq(changedCurvePoint)
+                    expect(changedCurvePoint).to.be.eq(newPoint)
+                })
+        
+                it("Adding a point should do it correctly", async() => {
+                    await expect(timeLockNonTransferablePoolUnlocked.connect(governance).curve(5)).to.be.reverted;
+                    const newPoint = (6*1e18).toString();
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurvePoint(newPoint, 5);
+                    
+                    const addedCurvePoint = await timeLockNonTransferablePoolUnlocked.curve(5);
+                    expect(addedCurvePoint).to.be.eq(newPoint)
+                })
+        
+                it("Removing a point should do it correctly", async() => {
+                    const newPoint = (4*1e18).toString();
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurvePoint(newPoint, 6);
+                    
+                    await expect(timeLockNonTransferablePoolUnlocked.curve(4)).to.be.reverted;
+                })
+        
+                it("Removing a point from a curve with length two should revert", async() => {
+                    
+                    const NEW_CURVE = [(1e18).toString(), (2*1e18).toString()]
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE);
+        
+                    const newPoint = (4*1e18).toString();
+                    // A curve cannot have less than two elements, thus it must fail
+                    await expect(timeLockNonTransferablePoolUnlocked.connect(governance).setCurvePoint(newPoint, 9)).to.be.revertedWith("ShortCurveError()");            
+                })
+        
+                it("Adding a point so that curve is not monotonic increasing should fail", async() => {
+                    await expect(timeLockNonTransferablePoolUnlocked.connect(governance).curve(5)).to.be.reverted;
+                    const newPoint = (4*1e18).toString();
+                    await expect(timeLockNonTransferablePoolUnlocked.connect(governance).setCurvePoint(newPoint, 5)).to.be.revertedWith("CurveIncreaseError");
+                })
+            });    
+        
+            describe("Curve changes", async() => {
+                beforeEach(async() => {
+                    await timeTraveler.revertSnapshot();
+    
+                    // Upgrade
+                    let timeLockNonTransferablePoolUnlockedImplementation: TimeLockNonTransferablePoolUnlocked;
+                    const TimeLockNonTransferablePoolUnlockedFactory = new TimeLockNonTransferablePoolUnlocked__factory(deployer);
+                    timeLockNonTransferablePoolUnlockedImplementation = await TimeLockNonTransferablePoolUnlockedFactory.deploy();
+                    await proxyAdmin.connect(governance).upgrade(proxy.address, timeLockNonTransferablePoolUnlockedImplementation.address);
+    
+                    const TimeLockNonTransferablePoolUnlocked = await ethers.getContractFactory("TimeLockNonTransferablePoolUnlocked");
+                    timeLockNonTransferablePoolUnlocked = await TimeLockNonTransferablePoolUnlocked.attach(proxy.address);
+                    timeLockNonTransferablePoolUnlocked = timeLockNonTransferablePoolUnlocked.connect(account1);
+                });
+
+                it("Curve should multiply correctly", async() => {
+                    const MIN_LOCK_DURATION = await timeLockNonTransferablePoolUnlocked.MIN_LOCK_DURATION();
+                    const minMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(MIN_LOCK_DURATION);
+                    const expectedResult1 = theoreticalMultiplier(MIN_LOCK_DURATION, CURVE)
+        
+                    const oneYearDuration = MAX_LOCK_DURATION / 4;
+                    const oneYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(oneYearDuration);
+                    const expectedResult2 = theoreticalMultiplier(oneYearDuration, CURVE)
+        
+                    const twoYearDuration = MAX_LOCK_DURATION / 2;
+                    const twoYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(twoYearDuration);
+                    const expectedResult3 = theoreticalMultiplier(twoYearDuration, CURVE)
+        
+                    const threeYearDuration = MAX_LOCK_DURATION * 3 / 4;
+                    const threeYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(threeYearDuration);
+                    const expectedResult4 = theoreticalMultiplier(threeYearDuration, CURVE)
+        
+                    const maxLockDuration = MAX_LOCK_DURATION;
+                    const maxMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(maxLockDuration);
+                    const expectedResult5 = theoreticalMultiplier(maxLockDuration, CURVE)
+        
+                    const randomDuration = Math.floor(Math.random() * (MAX_LOCK_DURATION - 1)) + 1;
+                    const randomMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(randomDuration);
+                    const expectedResult6 = theoreticalMultiplier(randomDuration, CURVE)
+        
+                    expect(expectedResult1).to.be.eq(minMultiplier)
+                    expect(expectedResult2).to.be.eq(oneYearMultiplier)
+                    expect(expectedResult3).to.be.eq(twoYearMultiplier)
+                    expect(expectedResult4).to.be.eq(threeYearMultiplier)
+                    expect(expectedResult5).to.be.eq(maxMultiplier)
+                    expect(expectedResult6).to.be.eq(randomMultiplier)
+                });
+        
+                it("Change curve and multiply correctly", async() => {
+                    // Setting a new curve should still work while getting the multiplier
+                    const NEW_CURVE = CURVE.map(function(x) {
+                        return (hre.ethers.BigNumber.from(x).mul(2).toString())
+                    })
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE);
+        
+                    const MIN_LOCK_DURATION = await timeLockNonTransferablePoolUnlocked.MIN_LOCK_DURATION();
+                    const minMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(MIN_LOCK_DURATION);
+                    const expectedResult1 = theoreticalMultiplier(MIN_LOCK_DURATION, NEW_CURVE)
+        
+                    const oneYearDuration = MAX_LOCK_DURATION / 4;
+                    const oneYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(oneYearDuration);
+                    const expectedResult2 = theoreticalMultiplier(oneYearDuration, NEW_CURVE)
+        
+                    const twoYearDuration = MAX_LOCK_DURATION / 2;
+                    const twoYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(twoYearDuration);
+                    const expectedResult3 = theoreticalMultiplier(twoYearDuration, NEW_CURVE)
+        
+                    const threeYearDuration = MAX_LOCK_DURATION * 3 / 4;
+                    const threeYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(threeYearDuration);
+                    const expectedResult4 = theoreticalMultiplier(threeYearDuration, NEW_CURVE)
+        
+                    const maxLockDuration = await timeLockNonTransferablePoolUnlocked.maxLockDuration();
+                    const maxMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(maxLockDuration);
+                    const expectedResult5 = theoreticalMultiplier(maxLockDuration, NEW_CURVE)
+        
+                    const randomDuration = Math.floor(Math.random() * (MAX_LOCK_DURATION - 1)) + 1;
+                    const randomMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(randomDuration);
+                    const expectedResult6 = theoreticalMultiplier(randomDuration, NEW_CURVE)
+        
+                    expect(expectedResult1).to.be.eq(minMultiplier)
+                    expect(expectedResult2).to.be.eq(oneYearMultiplier)
+                    expect(expectedResult3).to.be.eq(twoYearMultiplier)
+                    expect(expectedResult4).to.be.eq(threeYearMultiplier)
+                    expect(expectedResult5).to.be.eq(maxMultiplier)
+                    expect(expectedResult6).to.be.eq(randomMultiplier)
+                });
+        
+                it("Change curve by extending it", async() => {
+                    const NEW_RAW_CURVE = [
+                        0,
+                        0.113450636781733,
+                        0.23559102796425,
+                        0.367086765506204,
+                        0.508654422399196,
+                        0.661065457561288,
+                        0.825150419825931,
+                        1.00180347393553,
+                        1.19198727320361,
+                        1.39673820539865,
+                        1.61717204043653,
+                        1.85449001065813,
+                        2.10998535682594,
+                        2.38505037551144,
+                        2.6811840062773,
+                        3,
+                        3.34323571284532,
+                        3.71276157381861,
+                        4.11059127748229,
+                        4.53889275738489,
+                        5
+                    ]
+                    // Setting a new curve should still work while getting the multiplier
+                    const NEW_CURVE = NEW_RAW_CURVE.map(function(x) {
+                        return (x*1e18).toString();
+                    })
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE);
+        
+                    const MIN_LOCK_DURATION = await timeLockNonTransferablePoolUnlocked.MIN_LOCK_DURATION();
+                    const minMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(MIN_LOCK_DURATION);
+                    const expectedResult1 = theoreticalMultiplier(MIN_LOCK_DURATION, NEW_CURVE)
+        
+                    const oneYearDuration = MAX_LOCK_DURATION / 4;
+                    const oneYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(oneYearDuration);
+                    const expectedResult2 = theoreticalMultiplier(oneYearDuration, NEW_CURVE)
+        
+                    const twoYearDuration = MAX_LOCK_DURATION / 2;
+                    const twoYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(twoYearDuration);
+                    const expectedResult3 = theoreticalMultiplier(twoYearDuration, NEW_CURVE)
+        
+                    const threeYearDuration = MAX_LOCK_DURATION * 3 / 4;
+                    const threeYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(threeYearDuration);
+                    const expectedResult4 = theoreticalMultiplier(threeYearDuration, NEW_CURVE)
+        
+                    const maxLockDuration = await timeLockNonTransferablePoolUnlocked.maxLockDuration();
+                    const maxMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(maxLockDuration);
+                    const expectedResult5 = theoreticalMultiplier(maxLockDuration, NEW_CURVE)
+        
+                    const randomDuration = Math.floor(Math.random() * (MAX_LOCK_DURATION - 1)) + 1;
+                    const randomMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(randomDuration);
+                    const expectedResult6 = theoreticalMultiplier(randomDuration, NEW_CURVE)
+        
+                    expect(expectedResult1).to.be.eq(minMultiplier)
+                    expect(expectedResult2).to.be.eq(oneYearMultiplier)
+                    expect(expectedResult3).to.be.eq(twoYearMultiplier)
+                    expect(expectedResult4).to.be.eq(threeYearMultiplier)
+                    expect(expectedResult5).to.be.eq(maxMultiplier)
+                    expect(expectedResult6).to.be.eq(randomMultiplier)
+                });
+        
+                it("Change curve by reducing it", async() => {
+                    // Setting a new curve should still work while getting the multiplier
+                    const NEW_CURVE = [
+                        (0*1e18).toString(),
+                        (5*1e18).toString()
+                    ]
+                    await timeLockNonTransferablePoolUnlocked.connect(governance).setCurve(NEW_CURVE);
+        
+                    const MIN_LOCK_DURATION = await timeLockNonTransferablePoolUnlocked.MIN_LOCK_DURATION();
+                    const minMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(MIN_LOCK_DURATION);
+                    const expectedResult1 = theoreticalMultiplier(MIN_LOCK_DURATION, NEW_CURVE)
+        
+                    const oneYearDuration = MAX_LOCK_DURATION / 4;
+                    const oneYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(oneYearDuration);
+                    const expectedResult2 = theoreticalMultiplier(oneYearDuration, NEW_CURVE)
+        
+                    const twoYearDuration = MAX_LOCK_DURATION / 2;
+                    const twoYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(twoYearDuration);
+                    const expectedResult3 = theoreticalMultiplier(twoYearDuration, NEW_CURVE)
+        
+                    const threeYearDuration = MAX_LOCK_DURATION * 3 / 4;
+                    const threeYearMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(threeYearDuration);
+                    const expectedResult4 = theoreticalMultiplier(threeYearDuration, NEW_CURVE)
+        
+                    const maxLockDuration = await timeLockNonTransferablePoolUnlocked.maxLockDuration();
+                    const maxMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(maxLockDuration);
+                    const expectedResult5 = theoreticalMultiplier(maxLockDuration, NEW_CURVE)
+        
+                    const randomDuration = Math.floor(Math.random() * (MAX_LOCK_DURATION - 1)) + 1;
+                    const randomMultiplier = await timeLockNonTransferablePoolUnlocked.getMultiplier(randomDuration);
+                    const expectedResult6 = theoreticalMultiplier(randomDuration, NEW_CURVE)
+        
+                    expect(expectedResult1).to.be.eq(minMultiplier)
+                    expect(expectedResult2).to.be.eq(oneYearMultiplier)
+                    expect(expectedResult3).to.be.eq(twoYearMultiplier)
+                    expect(expectedResult4).to.be.eq(threeYearMultiplier)
+                    expect(expectedResult5).to.be.eq(maxMultiplier)
+                    expect(expectedResult6).to.be.eq(randomMultiplier)
+                });
+            });
+
+            describe("Kick", async() => {
+                const DEPOSIT_AMOUNT = parseEther("176.378");
+                const THREE_MONTHS = MAX_LOCK_DURATION / 12;
+
+                beforeEach(async() => {
+                    await timeTraveler.revertSnapshot();
+                    
+                    await timeLockNonTransferablePool.deposit(DEPOSIT_AMOUNT, THREE_MONTHS, account1.address);
+
+                    // Upgrade
+                    let timeLockNonTransferablePoolUnlockedImplementation: TimeLockNonTransferablePoolUnlocked;
+                    const TimeLockNonTransferablePoolUnlockedFactory = new TimeLockNonTransferablePoolUnlocked__factory(deployer);
+                    timeLockNonTransferablePoolUnlockedImplementation = await TimeLockNonTransferablePoolUnlockedFactory.deploy();
+                    await proxyAdmin.connect(governance).upgrade(proxy.address, timeLockNonTransferablePoolUnlockedImplementation.address);
+    
+                    const TimeLockNonTransferablePoolUnlocked = await ethers.getContractFactory("TimeLockNonTransferablePoolUnlocked");
+                    timeLockNonTransferablePoolUnlocked = await TimeLockNonTransferablePoolUnlocked.attach(proxy.address);
+                    timeLockNonTransferablePoolUnlocked = timeLockNonTransferablePoolUnlocked.connect(account1);
+                });
+        
+                it("Trying to kick a non existing deposit should revert", async() => {
+                    await expect(timeLockNonTransferablePoolUnlocked.kick(1, account1.address)).to.be.revertedWith("NonExistingDepositError()");
+                });
+        
+                it("Trying to kick before deposit ends should revert", async() => {
+                    await expect(timeLockNonTransferablePoolUnlocked.kick(0, account1.address)).to.be.revertedWith("TooSoonError()");
+                });
+        
+                it("Trying to kick after end should succeed", async() => {
+                    await timeTraveler.increaseTime(THREE_MONTHS * 2);
+                    const balanceBeforeKick = await timeLockNonTransferablePoolUnlocked.balanceOf(account1.address);
+                    const depositBeforeKick = await timeLockNonTransferablePoolUnlocked.depositsOf(account1.address, 0);
+                    await timeLockNonTransferablePoolUnlocked.kick(0, account1.address);
+                    const balanceAfterKick = await timeLockNonTransferablePoolUnlocked.balanceOf(account1.address);
+                    const depositAfterKick = await timeLockNonTransferablePoolUnlocked.depositsOf(account1.address, 0);
+        
+                    expect(balanceBeforeKick).to.be.eq(depositBeforeKick.shareAmount)
+                    expect(balanceAfterKick).to.be.eq(depositAfterKick.shareAmount).to.be.eq(depositBeforeKick.amount).to.be.eq(depositAfterKick.amount)
+                });
+            });
+        });    
     });
 });
