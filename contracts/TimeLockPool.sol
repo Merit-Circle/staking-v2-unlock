@@ -12,28 +12,60 @@ contract TimeLockPool is BasePool, ITimeLockPool {
     using Math for uint256;
     using SafeERC20 for IERC20;
 
+    // Min duration cannot be bigger than max duration
     error SmallMaxLockDuration();
+    // Deposit must exist
     error NonExistingDepositError();
+    // Deposit must have expired
     error TooSoonError();
+    // Point should be lower than maxBonus
     error MaxBonusError();
+    // Points in the curve must increase
     error CurveIncreaseError();
+    // Shares should not burn
     error ShareBurningError();
 
+    // Max multiplier a user can get
     uint256 public maxBonus;
+    // Max duration of a deposit
     uint256 public maxLockDuration;
+    // Min duration of a deposit
     uint256 public constant MIN_LOCK_DURATION = 1 days;
-    
+
+    // Curve points
     uint256[] public curve;
+    // Distance between two points of the curve, used to interpolate
     uint256 public unit;
 
+    // user => array of deposits
     mapping(address => Deposit[]) public depositsOf;
 
+    // Deposit struct
+    // amount: deposited tokens
+    // shareAmount: deposit tokens * multiplier
+    // start: beggining of deposit
+    // end: ending of deposit 
     struct Deposit {
         uint256 amount;
         uint256 shareAmount;
         uint64 start;
         uint64 end;
     }
+
+    /**
+     * @notice Used to initialize the contract in an upgradeable contracts context
+     * @dev Implementation is initialized on first deployment as it cannot have a constructor
+     * @param _name string name of the token
+     * @param _symbol _symbol symbol of the token
+     * @param _depositToken address token to be deposited
+     * @param _rewardToken address token to be received as a reward
+     * @param _escrowPool address pool were rewards are escrowed
+     * @param _escrowPortion uint256 percentage of rewards to be escrowed
+     * @param _escrowDuration uint256 time the escrow takes
+     * @param _maxBonus uint256 max multiplier users can get
+     * @param _maxLockDuration uint256 max time users can deposit
+     * @param _curve uint256[] points used to calculate multiplier for deposits
+     */
     function __TimeLockPool_init(
         string memory _name,
         string memory _symbol,
@@ -46,10 +78,14 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         uint256 _maxLockDuration,
         uint256[] memory _curve
     ) internal onlyInitializing {
+        // Initializes the BasePool contract
         __BasePool_init(_name, _symbol, _depositToken, _rewardToken, _escrowPool, _escrowPortion, _escrowDuration);
+        
+        // Min duration can't be bigger than max duration
         if (_maxLockDuration < MIN_LOCK_DURATION) {
             revert SmallMaxLockDuration();
         }
+        // Sanity check and setting of curve values
         checkCurve(_curve);
         for (uint i=0; i < _curve.length; i++) {
             if (_curve[i] > _maxBonus) {
@@ -57,21 +93,64 @@ contract TimeLockPool is BasePool, ITimeLockPool {
             }
             curve.push(_curve[i]);
         }
+        // Set variables
         maxBonus = _maxBonus;
         maxLockDuration = _maxLockDuration;
+
+        // Calculate unit
         unit = _maxLockDuration / (curve.length - 1);
     }
 
+    // Deposit has already expired
     error DepositExpiredError();
+    // Duration must not be zero
     error ZeroDurationError();
+    // Address must not be zero
     error ZeroAddressError();
+    // Amount must not be zero
     error ZeroAmountError();
+    // Length of the curve is too short
     error ShortCurveError();
 
+    /**
+     * @notice Events for when a deposit is created
+     * @param amount uint256 amount of tokens deposited
+     * @param duration uint256 duration of the deposit
+     * @param receiver address user who owns the deposit
+     * @param from address sender of the transaction
+     */
     event Deposited(uint256 amount, uint256 duration, address indexed receiver, address indexed from);
+    
+    /**
+     * @notice Events for when a deposit is withdrawn
+     * @param depositId uint256 identifier of the deposit
+     * @param receiver address user who owns the deposit
+     * @param from address sender of the transaction
+     * @param amount address amount of tokens withdrawn
+     */
     event Withdrawn(uint256 indexed depositId, address indexed receiver, address indexed from, uint256 amount);
+    
+    /**
+     * @notice Events for when a deposit is extended
+     * @param depositId uint256 identifier of the deposit
+     * @param duration uint256 amount of time to be extended
+     * @param from address sender of the transaction
+     */
     event LockExtended(uint256 indexed depositId, uint256 duration, address indexed from);
+    
+    /**
+     * @notice Events for when a deposit is increased
+     * @param depositId uint256 identifier of the deposit
+     * @param receiver address user who owns the deposit
+     * @param from address sender of the transaction
+     * @param amount address amount of extra tokens deposited
+     */
     event LockIncreased(uint256 indexed depositId, address indexed receiver, address indexed from, uint256 amount);
+
+    /**
+     * @notice Events for when the curve is modify
+     * @param sender address the user that modifies the curve
+     */
     event CurveChanged(address indexed sender);
 
     /**
@@ -91,17 +170,24 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         // Enforce min lockup duration to prevent flash loan or MEV transaction ordering
         duration = duration.max(MIN_LOCK_DURATION);
 
+        // Sets the amount to be minted
         uint256 mintAmount = _amount * getMultiplier(duration) / ONE;
 
+        // Pushes the deposit into the array of deposits
         depositsOf[_receiver].push(Deposit({
             amount: _amount,
             shareAmount: mintAmount,
             start: uint64(block.timestamp),
             end: uint64(block.timestamp) + uint64(duration)
         }));
-
+        
+        // Mints the tokens that represent the stake
         _mint(_receiver, mintAmount);
+
+        // Transfer the tokens
         depositToken.safeTransferFrom(_msgSender(), address(this), _amount);
+        
+        // Emits Deposited event
         emit Deposited(_amount, duration, _receiver, _msgSender());
     }
 
@@ -113,13 +199,17 @@ contract TimeLockPool is BasePool, ITimeLockPool {
      * @param _receiver address receiver of the withdrawn funds
      */
     function withdraw(uint256 _depositId, address _receiver) external {
+        // User must withdraw to a non-zero address
         if (_receiver == address(0)) {
             revert ZeroAddressError();
         }
+        // Deposit must exist
         if (_depositId >= depositsOf[_msgSender()].length) {
             revert NonExistingDepositError();
         }
+        // Fetch deposit struct
         Deposit memory userDeposit = depositsOf[_msgSender()][_depositId];
+        // Deposit must have expired to be withdrawn
         if (block.timestamp < userDeposit.end) {
             revert TooSoonError();
         }
@@ -133,6 +223,8 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         
         // return tokens
         depositToken.safeTransfer(_receiver, userDeposit.amount);
+
+        // Emits Withdrawn even
         emit Withdrawn(_depositId, _receiver, _msgSender(), userDeposit.amount);
     }
 
@@ -148,11 +240,12 @@ contract TimeLockPool is BasePool, ITimeLockPool {
      * @param _increaseDuration uint256 time to be added to the lock measured from the end of the lock
      */
     function extendLock(uint256 _depositId, uint256 _increaseDuration) external {
-        // Check if actually increasing
+        // Check if actually extending
         if (_increaseDuration == 0) {
             revert ZeroDurationError();
         }
 
+        // Fetch deposit
         Deposit memory userDeposit = depositsOf[_msgSender()][_depositId];
 
         // Only can extend if it has not expired
@@ -166,6 +259,7 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         // New duration is the time expiration plus the increase
         uint256 duration = maxLockDuration.min(uint256(userDeposit.end - block.timestamp) + increaseDuration);
 
+        // Sets the amount to be minted
         uint256 mintAmount = userDeposit.amount * getMultiplier(duration) / ONE;
 
         // Multiplier curve changes with time, need to check if the mint amount is bigger, equal or smaller than the already minted
@@ -179,8 +273,11 @@ contract TimeLockPool is BasePool, ITimeLockPool {
             revert ShareBurningError();
         }
 
+        // Update start and end of the deposit
         depositsOf[_msgSender()][_depositId].start = uint64(block.timestamp);
         depositsOf[_msgSender()][_depositId].end = uint64(block.timestamp) + uint64(duration);
+
+        // Emit LockExtended event
         emit LockExtended(_depositId, _increaseDuration, _msgSender());
     }
 
@@ -201,6 +298,7 @@ contract TimeLockPool is BasePool, ITimeLockPool {
             revert ZeroAmountError();
         }
 
+        // Fetch deposit
         Deposit memory userDeposit = depositsOf[_receiver][_depositId];
 
         // Only can extend if it has not expired
@@ -211,13 +309,18 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         // Multiplier should be according the remaining time  from the deposit until its end.
         uint256 remainingDuration = uint256(userDeposit.end - block.timestamp);
 
+        // Sets the amount to be minted
         uint256 mintAmount = _increaseAmount * getMultiplier(remainingDuration) / ONE;
 
+        // Adds the amount to the deposit
         depositsOf[_receiver][_depositId].amount += _increaseAmount;
         depositsOf[_receiver][_depositId].shareAmount += mintAmount;
 
+        // Mint the staked tokens
         _mint(_receiver, mintAmount);
         depositToken.safeTransferFrom(_msgSender(), address(this), _increaseAmount);
+
+        // Emit LockIncreased event
         emit LockIncreased(_depositId, _receiver, _msgSender(), _increaseAmount);
     }
 
@@ -244,6 +347,12 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         return ONE + curve[n] + (_lockDuration - n * unit) * (curve[n + 1] - curve[n]) / unit;
     }
 
+    /**
+     * @notice Gets the total amount of deposits of a user
+     * @dev This function loops through an array of deposits of a user to add all amounts
+     * @param _account address account to query deposits
+     * @return uint256 number of tokens deposited in total
+     */
     function getTotalDeposit(address _account) public view returns(uint256) {
         uint256 total;
         for(uint256 i = 0; i < depositsOf[_account].length; i++) {
@@ -253,15 +362,33 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         return total;
     }
 
+    /**
+     * @notice Gets all deposits of a user
+     * @dev It gets the array of structs of deposits of a user
+     * @param _account address account to query deposits
+     * @return Deposit[] array of structs of deposits
+     */
     function getDepositsOf(address _account) public view returns(Deposit[] memory) {
         return depositsOf[_account];
     }
 
+    /**
+     * @notice Gets the amount of deposits of a user
+     * @param _account address account to query length deposit
+     * @return uint256 number of deposits
+     */
     function getDepositsOfLength(address _account) public view returns(uint256) {
         return depositsOf[_account].length;
     }
 
+    /**
+     * @notice Returns an error in case the point exceedes maxBonus
+     * @dev Used to check that points of the curve are set correctly, caps them to the maxBonus
+     * @param _point uint256 value of the point
+     * @return uint256 final number of the point capped by the maxBonus
+     */
     function maxBonusError(uint256 _point) internal returns(uint256) {
+        // Point cannot be bigger than maxBonus
         if (_point > maxBonus) {
             revert MaxBonusError();
         } else {
@@ -317,14 +444,19 @@ contract TimeLockPool is BasePool, ITimeLockPool {
      * @param _position uint256 position of the array to be set (zero-based indexing convention).
      */
     function setCurvePoint(uint256 _newPoint, uint256 _position) external onlyGov {
+        // Point must be lower than maxBonus
         if (_newPoint > maxBonus) {
             revert MaxBonusError();
         }
+
+        // Replace a point 
         if (_position < curve.length) {
             curve[_position] = _newPoint;
+        // Add a point
         } else if (_position == curve.length) {
             curve.push(_newPoint);
             unit = maxLockDuration / (curve.length - 1);
+        // Remove a point
         } else {
             if (curve.length - 1 < 2) {
                 revert ShortCurveError();
@@ -332,14 +464,26 @@ contract TimeLockPool is BasePool, ITimeLockPool {
             curve.pop();
             unit = maxLockDuration / (curve.length - 1);
         }
+
+        // Sanity check of the curve
         checkCurve(curve);
+
+        // Emit CurveChanged error
         emit CurveChanged(_msgSender());
     }
 
+    /**
+     * @notice Sanity check for the curves
+     * @dev This function checks that the curve is set correctly
+     * @param _curve uint256[] curve to be checked
+     */
     function checkCurve(uint256[] memory _curve) internal {
+        // Must have at least two points
         if (_curve.length < 2) {
             revert ShortCurveError();
         }
+
+        // Points must increase
         for (uint256 i; i < _curve.length - 1; ++i) {
             if (_curve[i + 1] < _curve[i]) {
                 revert CurveIncreaseError();
@@ -347,11 +491,22 @@ contract TimeLockPool is BasePool, ITimeLockPool {
         }
     }
 
+    /**
+     * @notice Used to terminate already expired deposits
+     * @dev This function can be called by anyone if a deposit has already expired
+     * @param _depositId uint256 identifier of the deposit
+     * @param _user address user that owns that deposit
+     */
     function kick(uint256 _depositId, address _user) external {
+        // Deposit must exist
         if (_depositId >= depositsOf[_user].length) {
             revert NonExistingDepositError();
         }
+
+        // Fetch deposit
         Deposit memory userDeposit = depositsOf[_user][_depositId];
+
+        // Deposit must have expired
         if (block.timestamp < userDeposit.end) {
             revert TooSoonError();
         }

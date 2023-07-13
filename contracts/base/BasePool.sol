@@ -19,20 +19,25 @@ abstract contract BasePool is Initializable, AccessControlEnumerable, ERC20Votes
     using SafeCast for uint256;
     using SafeCast for int256;
 
+    // Errors
     error MoreThanOneError();
     error NoDepositTokenError();
     error NotGovError();
     error EscrowPoolError();
 
-    uint256[50] __gap; // Storage gap for reserving storage slots in future upgrades and preserve storage layout.
+    // Storage gap for reserving storage slots in future upgrades and preserve storage layout.
+    uint256[50] __gap;
 
-    uint256 public constant ONE = 1e18; // used as a unit for calculations.
+    // used as a unit for calculations.
+    uint256 public constant ONE = 1e18;
 
     IERC20 public depositToken;
     IERC20 public rewardToken;
     ITimeLockPool public escrowPool;
-    uint256 public escrowPortion; // how much is escrowed 1e18 == 100%
-    uint256 public escrowDuration; // escrow duration in seconds
+    // how much is escrowed 1e18 == 100%
+    uint256 public escrowPortion;
+    // escrow duration in seconds
+    uint256 public escrowDuration;
 
     bytes32 public constant GOV_ROLE = keccak256("GOV_ROLE");
 
