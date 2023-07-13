@@ -40,7 +40,6 @@ contract TimeLockNonTransferablePoolUnlocked is TimeLockPoolUnlocked {
      * @param _from address source of the tokens
      * @param _to address destination of the tokens
      * @param _amount uint256 amount of tokens transferred
-     * @return uint256 number of tokens deposited in total
      */
     function _transfer(address _from, address _to, uint256 _amount) internal override {
         // Reverts transaction
